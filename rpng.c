@@ -82,14 +82,20 @@ static int rpng_channels_for_color_type(int color_type) {
 }
 
 static int rpng_append_idat(RPNGState* st, const uint8_t* data, size_t size) {
+    size_t required;
     if (!st || !data) return RPNG_ERR_PARAM;
     if (size == 0) return RPNG_OK;
 
-    if (st->idat_size + size < st->idat_size) return RPNG_ERR_FORMAT;
-    if (st->idat_size + size > st->idat_cap) {
+    if (size > SIZE_MAX - st->idat_size) return RPNG_ERR_FORMAT;
+    required = st->idat_size + size;
+    if (required > RPNG_MAX_INPUT_BYTES) return RPNG_ERR_LIMIT;
+    if (required > st->idat_cap) {
         size_t new_cap = st->idat_cap ? st->idat_cap : 4096;
-        while (new_cap < st->idat_size + size) {
-            if (new_cap > (size_t)(1u << 30)) return RPNG_ERR_NOMEM;
+        while (new_cap < required) {
+            if (new_cap > RPNG_MAX_INPUT_BYTES / 2u) {
+                new_cap = RPNG_MAX_INPUT_BYTES;
+                break;
+            }
             new_cap *= 2;
         }
         uint8_t* new_buf = (uint8_t*)realloc(st->idat, new_cap);
@@ -99,7 +105,7 @@ static int rpng_append_idat(RPNGState* st, const uint8_t* data, size_t size) {
     }
 
     memcpy(st->idat + st->idat_size, data, size);
-    st->idat_size += size;
+    st->idat_size = required;
     return RPNG_OK;
 }
 
@@ -117,16 +123,18 @@ static void rpng_state_free(RPNGState* st) {
 static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
     size_t pos = 8; /* signature */
     if (!rpng_is_valid_signature(data, size)) return RPNG_ERR_FORMAT;
+    if (size > RPNG_MAX_INPUT_BYTES) return RPNG_ERR_LIMIT;
 
-    while (pos + 12 <= size) {
+    while (pos <= size && size - pos >= 12u) {
         uint32_t chunk_len = rpng_read_u32_be(data + pos);
         const uint8_t* chunk_type = data + pos + 4;
         const uint8_t* chunk_data = data + pos + 8;
-        size_t chunk_total = 12u + (size_t)chunk_len;
+        size_t chunk_total;
         uint32_t chunk_crc;
         uint32_t calc_crc;
 
-        if (pos + chunk_total > size) return RPNG_ERR_FORMAT;
+        if ((size_t)chunk_len > size - pos - 12u) return RPNG_ERR_FORMAT;
+        chunk_total = 12u + (size_t)chunk_len;
 
         chunk_crc = rpng_read_u32_be(chunk_data + chunk_len);
         calc_crc = rinz_crc32(chunk_type, 4);
@@ -144,6 +152,9 @@ static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
             st->interlace = (int)chunk_data[12];
 
             if (st->width == 0 || st->height == 0) return RPNG_ERR_FORMAT;
+            if (st->width > RPNG_MAX_DIMENSION ||
+                st->height > RPNG_MAX_DIMENSION)
+                return RPNG_ERR_LIMIT;
             if (st->compression != 0 || st->filter != 0) return RPNG_ERR_UNSUPPORTED;
             if (!(st->interlace == 0 || st->interlace == 1)) return RPNG_ERR_UNSUPPORTED;
             if (!rpng_valid_bit_depth(st->color_type, st->bit_depth)) return RPNG_ERR_UNSUPPORTED;
@@ -210,6 +221,8 @@ static uint64_t rpng_expected_raw_size(const RPNGState* st) {
 
     if (st->interlace == 0) {
         uint64_t rb = rpng_row_bytes(st->width, st->bit_depth, channels);
+        if (rb == UINT64_MAX || rb + 1u > UINT64_MAX / st->height)
+            return 0u;
         return (rb + 1u) * (uint64_t)st->height;
     }
 
@@ -227,6 +240,9 @@ static uint64_t rpng_expected_raw_size(const RPNGState* st) {
         }
         if (pw == 0 || ph == 0) continue;
         rb = rpng_row_bytes(pw, st->bit_depth, channels);
+        if (rb == UINT64_MAX || rb + 1u > UINT64_MAX / ph ||
+            total > UINT64_MAX - (rb + 1u) * (uint64_t)ph)
+            return 0u;
         total += (rb + 1u) * (uint64_t)ph;
     }
     return total;
@@ -457,7 +473,8 @@ static int rpng_decode_non_interlaced(const RPNGState* st,
 
     for (row = 0; row < st->height; ++row) {
         uint32_t* out_row = out_pixels + row * st->width;
-        if (pos + 1u + row_bytes > raw_size) {
+        if (pos > raw_size || raw_size - pos < 1u ||
+            row_bytes > raw_size - pos - 1u) {
             rc = RPNG_ERR_FORMAT;
             goto done;
         }
@@ -526,7 +543,8 @@ static int rpng_decode_adam7(const RPNGState* st,
             uint32_t out_tmp_max = pw;
             uint32_t* out_tmp = NULL;
             uint32_t px;
-            if (pos + 1u + row_bytes > raw_size) {
+            if (pos > raw_size || raw_size - pos < 1u ||
+                row_bytes > raw_size - pos - 1u) {
                 rc = RPNG_ERR_FORMAT;
                 goto pass_done;
             }
@@ -572,6 +590,8 @@ pass_done:
 int rpng_get_info(const uint8_t* data, size_t size, int* width, int* height) {
     RPNGState st;
     int rc;
+    if (width) *width = 0;
+    if (height) *height = 0;
     if (!data || !width || !height) return RPNG_ERR_PARAM;
 
     rpng_state_init(&st);
@@ -597,7 +617,12 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
     uint8_t* raw = NULL;
     size_t out_size = 0;
 
-    if (!data || !out_pixels || out_width <= 0 || out_height <= 0) return RPNG_ERR_PARAM;
+    if (!data || !out_pixels || out_width <= 0 || out_height <= 0 ||
+        (uint32_t)out_width > RPNG_MAX_DIMENSION ||
+        (uint32_t)out_height > RPNG_MAX_DIMENSION)
+        return RPNG_ERR_PARAM;
+    memset(out_pixels, 0, (size_t)(uint32_t)out_width *
+           (size_t)(uint32_t)out_height * sizeof(uint32_t));
 
     rpng_state_init(&st);
     rc = rpng_parse_chunks(data, size, &st);
@@ -617,8 +642,8 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
     }
 
     expected_raw = rpng_expected_raw_size(&st);
-    if (expected_raw == 0 || expected_raw > (uint64_t)(1u << 31)) {
-        rc = RPNG_ERR_UNSUPPORTED;
+    if (expected_raw == 0 || expected_raw > RPNG_MAX_RAW_BYTES) {
+        rc = RPNG_ERR_LIMIT;
         goto done;
     }
     raw_cap = (size_t)expected_raw;
@@ -629,28 +654,11 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
     }
 
     rc = rinz_inflate(st.idat, st.idat_size, raw, raw_cap, &out_size);
-    if (rc == RINZ_BUF_ERROR) {
-        /* Retry once with a larger buffer for non-conforming streams. */
-        size_t larger_cap = raw_cap * 2u;
-        if (larger_cap > (size_t)(1u << 28)) {
-            rc = RPNG_ERR_DECOMPRESS;
-            goto done;
-        }
-        free(raw);
-        raw = (uint8_t*)malloc(larger_cap);
-        if (!raw) {
-            rc = RPNG_ERR_NOMEM;
-            goto done;
-        }
-        raw_cap = larger_cap;
-        rc = rinz_inflate(st.idat, st.idat_size, raw, raw_cap, &out_size);
-    }
-
     if (rc != RINZ_OK) {
         rc = RPNG_ERR_DECOMPRESS;
         goto done;
     }
-    if (out_size < (size_t)expected_raw) {
+    if (out_size != (size_t)expected_raw) {
         rc = RPNG_ERR_FORMAT;
         goto done;
     }

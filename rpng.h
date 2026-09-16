@@ -15,6 +15,13 @@ extern "C" {
 #define RPNG_ERR_NOMEM -4
 #define RPNG_ERR_CRC -5
 #define RPNG_ERR_DECOMPRESS -6
+#define RPNG_ERR_LIMIT -7
+
+/* Direct callers do not provide a separate decode-limits structure, so the
+ * public codec keeps an explicit bounded admission policy of its own. */
+#define RPNG_MAX_INPUT_BYTES (64u * 1024u * 1024u)
+#define RPNG_MAX_DIMENSION 4096u
+#define RPNG_MAX_RAW_BYTES (256u * 1024u * 1024u)
 
 int rpng_get_info(const uint8_t* data, size_t size, int* width, int* height);
 
