@@ -32,3 +32,19 @@ The decoder has no cancellation/deadline API; its raw-data limit is not a CPU
 budget. The `rpng.h` C interface is source-level and does not publish a
 separately versioned binary ABI. RinOS integrates the codec through RinImage;
 this repository has no standalone build or test target.
+
+## Public API contract
+
+| Requirement | Contract |
+| --- | --- |
+| Purpose | RinPNG implements a bounded static PNG decoder used through RinImage and its C interface. |
+| Supported API | The public C interface is `rpng.h`. Supported images are static PNG files using the documented decoder profile. |
+| Unsupported API | APNG animation and PNG features outside the documented decoder profile are unsupported; use RinImage for the normal application integration. |
+| ownership | The caller owns input bytes and the destination pixel buffer and keeps them valid for the call. The decoder does not retain them. |
+| thread-safety | Independent calls using separate buffers may run concurrently. Do not share writable output buffers across calls. |
+| limits | Input is limited to 64 MiB, each dimension to 4096 pixels, and inflated raw image data to 256 MiB. Limit violations fail decoding. |
+| errors | Malformed, unsupported, truncated, or over-limit data returns failure. Output is valid only after successful completion. |
+| ABI stability | `rpng.h` is the public C ABI. No cross-version ABI stability guarantee is published; consumers should rebuild when updating RinPNG. |
+| security | Treat PNG bytes as untrusted. The decoder has input, dimension, and inflated-size caps; callers should still check status and avoid unbounded follow-on processing. |
+| build | No standalone build/test entry point is documented. RinImage is the supported integration point in the RinOS build. |
+| test | No standalone test command is documented for this submodule. Validate through RinImage and the consuming RinOS targets. |
