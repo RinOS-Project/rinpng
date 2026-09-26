@@ -38,7 +38,15 @@ typedef struct {
     uint16_t trns_r;
     uint16_t trns_g;
     uint16_t trns_b;
+
+    RPNGDeadlineFunction deadline;
+    void* deadline_context;
 } RPNGState;
+
+static int rpng_deadline_expired(const RPNGState* st) {
+    return st != NULL && st->deadline != NULL &&
+           st->deadline(st->deadline_context) != 0;
+}
 
 static uint32_t rpng_read_u32_be(const uint8_t* p) {
     return ((uint32_t)p[0] << 24) |
@@ -104,7 +112,16 @@ static int rpng_append_idat(RPNGState* st, const uint8_t* data, size_t size) {
         st->idat_cap = new_cap;
     }
 
-    memcpy(st->idat + st->idat_size, data, size);
+    {
+        size_t copied = 0u;
+        while (copied < size) {
+            size_t chunk = size - copied;
+            if (chunk > 65536u) chunk = 65536u;
+            if (rpng_deadline_expired(st)) return RPNG_ERR_DEADLINE;
+            memcpy(st->idat + st->idat_size + copied, data + copied, chunk);
+            copied += chunk;
+        }
+    }
     st->idat_size = required;
     return RPNG_OK;
 }
@@ -120,6 +137,26 @@ static void rpng_state_free(RPNGState* st) {
     memset(st, 0, sizeof(*st));
 }
 
+static int rpng_chunk_crc(const RPNGState* st, const uint8_t* chunk_type,
+                          const uint8_t* chunk_data, size_t chunk_len,
+                          uint32_t* crc_out) {
+    uint32_t crc;
+    size_t offset = 0u;
+    if (!chunk_type || (!chunk_data && chunk_len != 0u) || !crc_out)
+        return RPNG_ERR_PARAM;
+    if (rpng_deadline_expired(st)) return RPNG_ERR_DEADLINE;
+    crc = rinz_crc32(chunk_type, 4u);
+    while (offset < chunk_len) {
+        size_t chunk = chunk_len - offset;
+        if (chunk > 65536u) chunk = 65536u;
+        if (rpng_deadline_expired(st)) return RPNG_ERR_DEADLINE;
+        crc = rinz_crc32_update(crc, chunk_data + offset, chunk);
+        offset += chunk;
+    }
+    *crc_out = crc;
+    return RPNG_OK;
+}
+
 static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
     size_t pos = 8; /* signature */
     if (!rpng_is_valid_signature(data, size)) return RPNG_ERR_FORMAT;
@@ -132,13 +169,16 @@ static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
         size_t chunk_total;
         uint32_t chunk_crc;
         uint32_t calc_crc;
+        int crc_rc;
 
         if ((size_t)chunk_len > size - pos - 12u) return RPNG_ERR_FORMAT;
         chunk_total = 12u + (size_t)chunk_len;
 
         chunk_crc = rpng_read_u32_be(chunk_data + chunk_len);
-        calc_crc = rinz_crc32(chunk_type, 4);
-        calc_crc = rinz_crc32_update(calc_crc, chunk_data, chunk_len);
+        if (rpng_deadline_expired(st)) return RPNG_ERR_DEADLINE;
+        crc_rc = rpng_chunk_crc(st, chunk_type, chunk_data, chunk_len,
+                                &calc_crc);
+        if (crc_rc != RPNG_OK) return crc_rc;
         if (calc_crc != chunk_crc) return RPNG_ERR_CRC;
 
         if (memcmp(chunk_type, "IHDR", 4) == 0) {
@@ -268,30 +308,45 @@ static int rpng_paeth(int a, int b, int c) {
 }
 
 static int rpng_unfilter_row(uint8_t* dst, const uint8_t* src, const uint8_t* prev,
-                             size_t row_bytes, size_t bpp) {
+                             size_t row_bytes, size_t bpp,
+                             RPNGDeadlineFunction deadline,
+                             void* deadline_context) {
     uint8_t filter = src[0];
     const uint8_t* in = src + 1;
     size_t i;
     if (bpp == 0) bpp = 1;
+    if (deadline != NULL && deadline(deadline_context) != 0)
+        return RPNG_ERR_DEADLINE;
 
     switch (filter) {
         case 0:
             memcpy(dst, in, row_bytes);
+            if (deadline != NULL && deadline(deadline_context) != 0)
+                return RPNG_ERR_DEADLINE;
             break;
         case 1:
             for (i = 0; i < row_bytes; ++i) {
+                if ((i & 0xfffu) == 0u && deadline != NULL &&
+                    deadline(deadline_context) != 0)
+                    return RPNG_ERR_DEADLINE;
                 uint8_t left = (i >= bpp) ? dst[i - bpp] : 0;
                 dst[i] = (uint8_t)(in[i] + left);
             }
             break;
         case 2:
             for (i = 0; i < row_bytes; ++i) {
+                if ((i & 0xfffu) == 0u && deadline != NULL &&
+                    deadline(deadline_context) != 0)
+                    return RPNG_ERR_DEADLINE;
                 uint8_t up = prev ? prev[i] : 0;
                 dst[i] = (uint8_t)(in[i] + up);
             }
             break;
         case 3:
             for (i = 0; i < row_bytes; ++i) {
+                if ((i & 0xfffu) == 0u && deadline != NULL &&
+                    deadline(deadline_context) != 0)
+                    return RPNG_ERR_DEADLINE;
                 uint8_t left = (i >= bpp) ? dst[i - bpp] : 0;
                 uint8_t up = prev ? prev[i] : 0;
                 dst[i] = (uint8_t)(in[i] + ((left + up) >> 1));
@@ -299,6 +354,9 @@ static int rpng_unfilter_row(uint8_t* dst, const uint8_t* src, const uint8_t* pr
             break;
         case 4:
             for (i = 0; i < row_bytes; ++i) {
+                if ((i & 0xfffu) == 0u && deadline != NULL &&
+                    deadline(deadline_context) != 0)
+                    return RPNG_ERR_DEADLINE;
                 int left = (i >= bpp) ? dst[i - bpp] : 0;
                 int up = prev ? prev[i] : 0;
                 int ul = (prev && i >= bpp) ? prev[i - bpp] : 0;
@@ -454,7 +512,9 @@ static int rpng_decode_row_to_argb(const RPNGState* st, const uint8_t* row,
 
 static int rpng_decode_non_interlaced(const RPNGState* st,
                                       const uint8_t* raw, size_t raw_size,
-                                      uint32_t* out_pixels) {
+                                      uint32_t* out_pixels,
+                                      RPNGDeadlineFunction deadline,
+                                      void* deadline_context) {
     int channels = rpng_channels_for_color_type(st->color_type);
     size_t row_bytes;
     size_t bpp;
@@ -479,12 +539,17 @@ static int rpng_decode_non_interlaced(const RPNGState* st,
 
     for (row = 0; row < st->height; ++row) {
         uint32_t* out_row = out_pixels + row * st->width;
+        if (deadline != NULL && deadline(deadline_context) != 0) {
+            rc = RPNG_ERR_DEADLINE;
+            goto done;
+        }
         if (pos > raw_size || raw_size - pos < 1u ||
             row_bytes > raw_size - pos - 1u) {
             rc = RPNG_ERR_FORMAT;
             goto done;
         }
-        rc = rpng_unfilter_row(cur, raw + pos, prev, row_bytes, bpp);
+        rc = rpng_unfilter_row(cur, raw + pos, prev, row_bytes, bpp,
+                               deadline, deadline_context);
         if (rc != RPNG_OK) goto done;
 
         rc = rpng_decode_row_to_argb(st, cur, st->width, out_row);
@@ -502,7 +567,9 @@ done:
 
 static int rpng_decode_adam7(const RPNGState* st,
                              const uint8_t* raw, size_t raw_size,
-                             uint32_t* out_pixels) {
+                             uint32_t* out_pixels,
+                             RPNGDeadlineFunction deadline,
+                             void* deadline_context) {
     static const int pass_x_start[7] = {0, 4, 0, 2, 0, 1, 0};
     static const int pass_y_start[7] = {0, 0, 4, 0, 2, 0, 1};
     static const int pass_x_step[7] = {8, 8, 4, 4, 2, 2, 1};
@@ -524,6 +591,9 @@ static int rpng_decode_adam7(const RPNGState* st,
         uint8_t* prev = NULL;
         uint8_t* cur = NULL;
         uint32_t py;
+
+        if (deadline != NULL && deadline(deadline_context) != 0)
+            return RPNG_ERR_DEADLINE;
 
         if (st->width > (uint32_t)pass_x_start[pass]) {
             pw = (st->width - (uint32_t)pass_x_start[pass] + (uint32_t)pass_x_step[pass] - 1u) /
@@ -549,13 +619,18 @@ static int rpng_decode_adam7(const RPNGState* st,
             uint32_t out_tmp_max = pw;
             uint32_t* out_tmp = NULL;
             uint32_t px;
+            if (deadline != NULL && deadline(deadline_context) != 0) {
+                rc = RPNG_ERR_DEADLINE;
+                goto pass_done;
+            }
             if (pos > raw_size || raw_size - pos < 1u ||
                 row_bytes > raw_size - pos - 1u) {
                 rc = RPNG_ERR_FORMAT;
                 goto pass_done;
             }
 
-            rc = rpng_unfilter_row(cur, raw + pos, prev, row_bytes, bpp);
+            rc = rpng_unfilter_row(cur, raw + pos, prev, row_bytes, bpp,
+                                   deadline, deadline_context);
             if (rc != RPNG_OK) goto pass_done;
 
             out_tmp = (uint32_t*)malloc((size_t)out_tmp_max * sizeof(uint32_t));
@@ -594,6 +669,13 @@ pass_done:
 }
 
 int rpng_get_info(const uint8_t* data, size_t size, int* width, int* height) {
+    return rpng_get_info_with_deadline(data, size, width, height, NULL, NULL);
+}
+
+int rpng_get_info_with_deadline(const uint8_t* data, size_t size,
+                                int* width, int* height,
+                                RPNGDeadlineFunction deadline,
+                                void* deadline_context) {
     RPNGState st;
     int rc;
     if (width) *width = 0;
@@ -601,9 +683,13 @@ int rpng_get_info(const uint8_t* data, size_t size, int* width, int* height) {
     if (!data || !width || !height) return RPNG_ERR_PARAM;
 
     rpng_state_init(&st);
+    st.deadline = deadline;
+    st.deadline_context = deadline_context;
     rc = rpng_parse_chunks(data, size, &st);
     if (rc == RPNG_OK) {
-        if (!st.has_ihdr || st.width > 0x7fffffffU || st.height > 0x7fffffffU) {
+        if (rpng_deadline_expired(&st)) {
+            rc = RPNG_ERR_DEADLINE;
+        } else if (!st.has_ihdr || st.width > 0x7fffffffU || st.height > 0x7fffffffU) {
             rc = RPNG_ERR_FORMAT;
         } else {
             *width = (int)st.width;
@@ -616,6 +702,14 @@ int rpng_get_info(const uint8_t* data, size_t size, int* width, int* height) {
 
 int rpng_decode_rgba(const uint8_t* data, size_t size,
                      uint32_t* out_pixels, int out_width, int out_height) {
+    return rpng_decode_rgba_with_deadline(data, size, out_pixels, out_width,
+                                          out_height, NULL, NULL);
+}
+
+int rpng_decode_rgba_with_deadline(const uint8_t* data, size_t size,
+                                   uint32_t* out_pixels, int out_width,
+                                   int out_height, RPNGDeadlineFunction deadline,
+                                   void* deadline_context) {
     RPNGState st;
     int rc;
     uint64_t expected_raw;
@@ -636,6 +730,8 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
            (size_t)(uint32_t)out_height * sizeof(uint32_t));
 
     rpng_state_init(&st);
+    st.deadline = deadline;
+    st.deadline_context = deadline_context;
     rc = rpng_parse_chunks(data, size, &st);
     if (rc != RPNG_OK) goto done;
 
@@ -664,10 +760,13 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
         goto done;
     }
 
-    rc = rinz_inflate_limited(st.idat, st.idat_size, raw, raw_cap, &out_size,
-                              &inflate_limits);
+    rc = rinz_inflate_limited_with_deadline(
+        st.idat, st.idat_size, raw, raw_cap, &out_size, &inflate_limits,
+        deadline, deadline_context);
     if (rc != RINZ_OK) {
-        rc = rc == RINZ_LIMIT_ERROR ? RPNG_ERR_LIMIT : RPNG_ERR_DECOMPRESS;
+        if (rc == RINZ_LIMIT_ERROR) rc = RPNG_ERR_LIMIT;
+        else if (rc == RINZ_DEADLINE_ERROR) rc = RPNG_ERR_DEADLINE;
+        else rc = RPNG_ERR_DECOMPRESS;
         goto done;
     }
     if (out_size != (size_t)expected_raw) {
@@ -676,9 +775,11 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
     }
 
     if (st.interlace == 0) {
-        rc = rpng_decode_non_interlaced(&st, raw, out_size, out_pixels);
+        rc = rpng_decode_non_interlaced(&st, raw, out_size, out_pixels,
+                                        deadline, deadline_context);
     } else {
-        rc = rpng_decode_adam7(&st, raw, out_size, out_pixels);
+        rc = rpng_decode_adam7(&st, raw, out_size, out_pixels,
+                               deadline, deadline_context);
     }
 
 done:

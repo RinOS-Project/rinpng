@@ -16,6 +16,7 @@ extern "C" {
 #define RPNG_ERR_CRC -5
 #define RPNG_ERR_DECOMPRESS -6
 #define RPNG_ERR_LIMIT -7
+#define RPNG_ERR_DEADLINE -8
 
 /* Direct callers do not provide a separate decode-limits structure, so the
  * public codec keeps an explicit bounded admission policy of its own. */
@@ -24,10 +25,23 @@ extern "C" {
 #define RPNG_MAX_RAW_BYTES (256u * 1024u * 1024u)
 #define RPNG_MAX_DEFLATE_BLOCKS (1u << 20)
 
+/* Return non-zero when the caller-owned monotonic deadline has expired. */
+typedef int (*RPNGDeadlineFunction)(void* context);
+
 int rpng_get_info(const uint8_t* data, size_t size, int* width, int* height);
+
+int rpng_get_info_with_deadline(const uint8_t* data, size_t size,
+                                int* width, int* height,
+                                RPNGDeadlineFunction deadline,
+                                void* deadline_context);
 
 int rpng_decode_rgba(const uint8_t* data, size_t size,
                      uint32_t* out_pixels, int out_width, int out_height);
+
+int rpng_decode_rgba_with_deadline(const uint8_t* data, size_t size,
+                                   uint32_t* out_pixels, int out_width,
+                                   int out_height, RPNGDeadlineFunction deadline,
+                                   void* deadline_context);
 
 #ifdef __cplusplus
 }
