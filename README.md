@@ -25,10 +25,11 @@ capacity parameter, so the caller must allocate at least `width * height`
 temporary palette, IDAT, and inflated buffers only for the duration of the
 call; independent calls use independent parser state.
 
-Codec-local limits are 64 MiB encoded input, 4096 pixels per dimension, and
-256 MiB inflated raw data. The common RinImage defaults further cap canonical
-output at 64 MiB. Return values distinguish parameter, format, unsupported,
-allocation, CRC, decompression, and limit failures through `RPNG_ERR_*`.
+Codec-local limits are 64 MiB encoded input, 4096 pixels per dimension,
+256 MiB inflated raw data, and 1,048,576 DEFLATE blocks. The common RinImage
+defaults further cap canonical output at 64 MiB. Return values distinguish
+parameter, format, unsupported, allocation, CRC, decompression, and limit
+failures through `RPNG_ERR_*`.
 
 Treat input as untrusted and apply caller-specific limits before decoding.
 The decoder has no cancellation/deadline API; its raw-data limit is not a CPU
@@ -45,7 +46,7 @@ this repository has no standalone build or test target.
 | Unsupported API | APNG animation and PNG features outside the documented decoder profile are unsupported; use RinImage for the normal application integration. |
 | ownership | The caller owns input bytes and the destination pixel buffer and keeps them valid for the call. The decoder does not retain them. |
 | thread-safety | Independent calls using separate buffers may run concurrently. Do not share writable output buffers across calls. |
-| limits | Input is limited to 64 MiB, each dimension to 4096 pixels, and inflated raw image data to 256 MiB. Limit violations fail decoding. |
+| limits | Input is limited to 64 MiB, each dimension to 4096 pixels, inflated raw image data to 256 MiB, and the DEFLATE stream to 1,048,576 blocks. Limit violations fail decoding. |
 | errors | Malformed, unsupported, truncated, or over-limit data returns failure. Output is valid only after successful completion. |
 | ABI stability | `rpng.h` is the public C ABI. No cross-version ABI stability guarantee is published; consumers should rebuild when updating RinPNG. |
 | security | Treat PNG bytes as untrusted. The decoder has input, dimension, and inflated-size caps; callers should still check status and avoid unbounded follow-on processing. |

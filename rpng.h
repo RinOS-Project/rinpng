@@ -22,6 +22,7 @@ extern "C" {
 #define RPNG_MAX_INPUT_BYTES (64u * 1024u * 1024u)
 #define RPNG_MAX_DIMENSION 4096u
 #define RPNG_MAX_RAW_BYTES (256u * 1024u * 1024u)
+#define RPNG_MAX_DEFLATE_BLOCKS (1u << 20)
 
 int rpng_get_info(const uint8_t* data, size_t size, int* width, int* height);
 

@@ -622,6 +622,11 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
     size_t raw_cap;
     uint8_t* raw = NULL;
     size_t out_size = 0;
+    const RinzInflateLimits inflate_limits = {
+        RPNG_MAX_INPUT_BYTES,
+        RPNG_MAX_RAW_BYTES,
+        RPNG_MAX_DEFLATE_BLOCKS
+    };
 
     if (!data || !out_pixels || out_width <= 0 || out_height <= 0 ||
         (uint32_t)out_width > RPNG_MAX_DIMENSION ||
@@ -659,7 +664,8 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
         goto done;
     }
 
-    rc = rinz_inflate(st.idat, st.idat_size, raw, raw_cap, &out_size);
+    rc = rinz_inflate_limited(st.idat, st.idat_size, raw, raw_cap, &out_size,
+                              &inflate_limits);
     if (rc != RINZ_OK) {
         rc = RPNG_ERR_DECOMPRESS;
         goto done;
