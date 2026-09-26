@@ -667,7 +667,7 @@ int rpng_decode_rgba(const uint8_t* data, size_t size,
     rc = rinz_inflate_limited(st.idat, st.idat_size, raw, raw_cap, &out_size,
                               &inflate_limits);
     if (rc != RINZ_OK) {
-        rc = RPNG_ERR_DECOMPRESS;
+        rc = rc == RINZ_LIMIT_ERROR ? RPNG_ERR_LIMIT : RPNG_ERR_DECOMPRESS;
         goto done;
     }
     if (out_size != (size_t)expected_raw) {
