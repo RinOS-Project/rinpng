@@ -10,9 +10,12 @@ palette data, `tRNS`, and CRC validation. The output is stored in 32-bit
 caller-owned pixels. `rin_image_decode_png` is the preferred RinOS entry point
 when a caller needs the common ARGB8888 contract and configurable limits.
 
-APNG animation is not implemented. The decoder does not expose ancillary PNG
-metadata as a color-management contract. A format identifier or valid IHDR
-alone does not mean that an unsupported PNG feature is decoded.
+APNG animation is not implemented. The parser explicitly rejects the APNG
+`acTL`, `fcTL`, and `fdAT` chunks with `RPNG_ERR_UNSUPPORTED`, so the first
+frame cannot be accidentally accepted as a static PNG. The decoder does not
+expose ancillary PNG metadata as a color-management contract. A format
+identifier or valid IHDR alone does not mean that an unsupported PNG feature
+is decoded.
 
 ## Ownership, limits, and errors
 

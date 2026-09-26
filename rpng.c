@@ -191,6 +191,12 @@ static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
             if (!st->has_ihdr) return RPNG_ERR_FORMAT;
             rc = rpng_append_idat(st, chunk_data, chunk_len);
             if (rc != RPNG_OK) return rc;
+        } else if (memcmp(chunk_type, "acTL", 4) == 0 ||
+                   memcmp(chunk_type, "fcTL", 4) == 0 ||
+                   memcmp(chunk_type, "fdAT", 4) == 0) {
+            /* APNG is outside this static decoder's profile.  Do not let
+             * its first IDAT frame be accepted as an ordinary PNG. */
+            return RPNG_ERR_UNSUPPORTED;
         } else if (memcmp(chunk_type, "IEND", 4) == 0) {
             if (chunk_len != 0) return RPNG_ERR_FORMAT;
             st->has_iend = 1;
