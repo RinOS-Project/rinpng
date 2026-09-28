@@ -11,6 +11,12 @@ palette data, `tRNS`, and CRC validation. The output is stored in 32-bit
 caller-owned pixels. `rin_image_decode_png` is the preferred RinOS entry point
 when a caller needs the common ARGB8888 contract and configurable limits.
 
+The parser also enforces the static PNG chunk structure: `IHDR` is first,
+`IDAT` chunks are contiguous and required, `IEND` is final, duplicate
+singleton chunks and invalid palette/transparency ordering are rejected, and
+unknown critical chunks are not ignored. Trailing bytes after `IEND` are not
+accepted as part of a valid image.
+
 APNG animation is not implemented. The parser explicitly rejects the APNG
 `acTL`, `fcTL`, and `fdAT` chunks with `RPNG_ERR_UNSUPPORTED`, so the first
 frame cannot be accidentally accepted as a static PNG. The decoder does not

@@ -20,7 +20,11 @@ typedef struct {
     int filter;
     int interlace;
     int has_ihdr;
+    int has_plte;
+    int has_trns;
+    int has_idat;
     int has_iend;
+    int idat_closed;
 
     uint8_t* idat;
     size_t idat_size;
@@ -137,6 +141,20 @@ static void rpng_state_free(RPNGState* st) {
     memset(st, 0, sizeof(*st));
 }
 
+static int rpng_is_ascii_letter(uint8_t value) {
+    return (value >= (uint8_t)'A' && value <= (uint8_t)'Z') ||
+           (value >= (uint8_t)'a' && value <= (uint8_t)'z');
+}
+
+static int rpng_chunk_type_valid(const uint8_t* chunk_type) {
+    if (!chunk_type || !rpng_is_ascii_letter(chunk_type[0]) ||
+        !rpng_is_ascii_letter(chunk_type[1]) ||
+        !rpng_is_ascii_letter(chunk_type[2]) ||
+        !rpng_is_ascii_letter(chunk_type[3])) return 0;
+    /* The reserved bit is the third letter's case and must be uppercase. */
+    return chunk_type[2] >= (uint8_t)'A' && chunk_type[2] <= (uint8_t)'Z';
+}
+
 static int rpng_chunk_crc(const RPNGState* st, const uint8_t* chunk_type,
                           const uint8_t* chunk_data, size_t chunk_len,
                           uint32_t* crc_out) {
@@ -171,6 +189,7 @@ static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
         uint32_t calc_crc;
         int crc_rc;
 
+        if (!rpng_chunk_type_valid(chunk_type)) return RPNG_ERR_FORMAT;
         if ((size_t)chunk_len > size - pos - 12u) return RPNG_ERR_FORMAT;
         chunk_total = 12u + (size_t)chunk_len;
 
@@ -180,6 +199,12 @@ static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
                                 &calc_crc);
         if (crc_rc != RPNG_OK) return crc_rc;
         if (calc_crc != chunk_crc) return RPNG_ERR_CRC;
+
+        if (!st->has_ihdr && memcmp(chunk_type, "IHDR", 4) != 0)
+            return RPNG_ERR_FORMAT;
+        if (st->has_idat && memcmp(chunk_type, "IDAT", 4) != 0 &&
+            memcmp(chunk_type, "IEND", 4) != 0)
+            st->idat_closed = 1;
 
         if (memcmp(chunk_type, "IHDR", 4) == 0) {
             if (chunk_len != 13 || st->has_ihdr) return RPNG_ERR_FORMAT;
@@ -201,17 +226,28 @@ static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
             st->has_ihdr = 1;
         } else if (memcmp(chunk_type, "PLTE", 4) == 0) {
             uint8_t* new_palette;
-            if (!st->has_ihdr) return RPNG_ERR_FORMAT;
+            size_t entries;
+            if (!st->has_ihdr || st->has_plte || st->idat_closed || st->has_idat)
+                return RPNG_ERR_FORMAT;
+            if (st->color_type == 0 || st->color_type == 4)
+                return RPNG_ERR_FORMAT;
             if (chunk_len == 0 || (chunk_len % 3) != 0 || chunk_len > 768) return RPNG_ERR_FORMAT;
+            entries = (size_t)chunk_len / 3u;
+            if (st->color_type == 3 && entries > ((size_t)1u << (size_t)st->bit_depth))
+                return RPNG_ERR_FORMAT;
             new_palette = (uint8_t*)realloc(st->palette, chunk_len);
             if (!new_palette) return RPNG_ERR_NOMEM;
             st->palette = new_palette;
             memcpy(st->palette, chunk_data, chunk_len);
             st->palette_size = chunk_len;
+            st->has_plte = 1;
         } else if (memcmp(chunk_type, "tRNS", 4) == 0) {
-            if (!st->has_ihdr) return RPNG_ERR_FORMAT;
+            if (!st->has_ihdr || st->has_trns || st->idat_closed || st->has_idat)
+                return RPNG_ERR_FORMAT;
             if (st->color_type == 3) {
                 if (chunk_len > 256) return RPNG_ERR_FORMAT;
+                if (!st->has_plte || chunk_len > st->palette_size / 3u)
+                    return RPNG_ERR_FORMAT;
                 memset(st->trns_palette, 255, sizeof(st->trns_palette));
                 memcpy(st->trns_palette, chunk_data, chunk_len);
                 st->trns_palette_size = chunk_len;
@@ -219,18 +255,29 @@ static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
                 if (chunk_len != 2) return RPNG_ERR_FORMAT;
                 st->has_trns_gray = 1;
                 st->trns_gray = rpng_read_u16_be(chunk_data);
+                if ((st->bit_depth < 16 && st->trns_gray >= ((uint16_t)1u << (uint16_t)st->bit_depth)))
+                    return RPNG_ERR_FORMAT;
             } else if (st->color_type == 2) {
                 if (chunk_len != 6) return RPNG_ERR_FORMAT;
                 st->has_trns_rgb = 1;
                 st->trns_r = rpng_read_u16_be(chunk_data);
                 st->trns_g = rpng_read_u16_be(chunk_data + 2);
                 st->trns_b = rpng_read_u16_be(chunk_data + 4);
+                if (st->bit_depth == 8 &&
+                    (st->trns_r > 0xffu || st->trns_g > 0xffu || st->trns_b > 0xffu))
+                    return RPNG_ERR_FORMAT;
+            } else {
+                return RPNG_ERR_FORMAT;
             }
+            st->has_trns = 1;
         } else if (memcmp(chunk_type, "IDAT", 4) == 0) {
             int rc;
-            if (!st->has_ihdr) return RPNG_ERR_FORMAT;
+            if (!st->has_ihdr || st->idat_closed ||
+                (st->color_type == 3 && !st->has_plte))
+                return RPNG_ERR_FORMAT;
             rc = rpng_append_idat(st, chunk_data, chunk_len);
             if (rc != RPNG_OK) return rc;
+            st->has_idat = 1;
         } else if (memcmp(chunk_type, "acTL", 4) == 0 ||
                    memcmp(chunk_type, "fcTL", 4) == 0 ||
                    memcmp(chunk_type, "fdAT", 4) == 0) {
@@ -238,9 +285,17 @@ static int rpng_parse_chunks(const uint8_t* data, size_t size, RPNGState* st) {
              * its first IDAT frame be accepted as an ordinary PNG. */
             return RPNG_ERR_UNSUPPORTED;
         } else if (memcmp(chunk_type, "IEND", 4) == 0) {
-            if (chunk_len != 0) return RPNG_ERR_FORMAT;
+            if (chunk_len != 0 || !st->has_idat ||
+                (st->color_type == 3 && !st->has_plte) ||
+                pos + chunk_total != size)
+                return RPNG_ERR_FORMAT;
             st->has_iend = 1;
             return RPNG_OK;
+        } else if (chunk_type[0] >= (uint8_t)'A' &&
+                   chunk_type[0] <= (uint8_t)'Z') {
+            /* A decoder that does not implement a critical chunk must not
+             * silently expose a partially interpreted image. */
+            return RPNG_ERR_UNSUPPORTED;
         }
 
         pos += chunk_total;
