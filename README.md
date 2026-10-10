@@ -10,6 +10,9 @@ with the bit depths permitted for each type; it handles Adam7, filters 0..4,
 palette data, `tRNS`, and CRC validation. The output is stored in 32-bit
 caller-owned pixels. `rin_image_decode_png` is the preferred RinOS entry point
 when a caller needs the common ARGB8888 contract and configurable limits.
+RinImage's cancellable PNG probe/decode entries pass their predicate through to
+the deadline-aware RinPNG APIs and normalize expiry to
+`RIN_IMAGE_CANCELLED`.
 
 The parser also enforces the static PNG chunk structure: `IHDR` is first,
 `IDAT` chunks are contiguous and required, `IEND` is final, duplicate
